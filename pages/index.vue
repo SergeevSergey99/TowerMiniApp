@@ -310,15 +310,28 @@ export default {
 </script>
 
 <style scoped>
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
 .game-container {
   position: relative;
+  display: flex;
+  justify-content: center;
   margin: 0 auto;
-  width: 300px;
-  height: 500px;
+  width: 100vw;
+  height: 100vh;
   text-align: center;
   user-select: none;
+  align-items: center;
+  background-color: #000; /* Задай фон для лучшего восприятия */
 }
 canvas {
+  width: 100%;
+  height: 100%;
   border: 1px solid #333;
   background: #ecf0f1;
   display: block;
