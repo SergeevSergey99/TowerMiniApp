@@ -1,21 +1,23 @@
 ﻿<template>
   <div class="game-container">
     <canvas ref="gameCanvas"></canvas>
-    <div class="score">Счёт: {{ score }}</div>
-    <div class="sway-indicator" :style="{ color: Math.abs(towerSway) > swayThreshold * 0.8 ? 'red' : 'black' }">
-      Сдвиг башни: {{ Math.round(towerSway) }} px / Предел: {{ swayThreshold }} px
+
+    <!-- Оверлей стартового экрана -->
+    <div v-if="screen === 'start'" class="overlay start-screen">
+      <h1>Tower Game</h1>
+      <button @click="startGame">Start</button>
     </div>
-    <button v-if="!gameOver" @click="handleTap" class="tap-button">
-      Отпустить этаж
-    </button>
-    <button v-if="!gameOver && Math.abs(towerSway) > 5" @click="stabilizeTower" class="stabilize-button">
-      Стабилизировать башню
-    </button>
-    <div v-if="gameOver" class="game-over">
-      Игра окончена!<br />
-      Ваш счёт: {{ score }}<br />
-      Рекорд: {{ highScore }}<br />
-      <button @click="restart">Начать заново</button>
+
+    <!-- Оверлей экрана окончания игры -->
+    <div v-if="screen === 'gameover'" class="overlay gameover-screen">
+      <h1>Game Over</h1>
+      <p>Score: {{ score }}</p>
+      <button @click="restart">Restart</button>
+    </div>
+
+    <!-- Индикатор счета во время игры -->
+    <div v-if="screen === 'game'" class="score-display">
+      Score: {{ score }}
     </div>
   </div>
 </template>
@@ -24,30 +26,45 @@
 export default {
   data() {
     return {
-      // Основные параметры игры и канваса
+      // Режим экрана: 'start', 'game', 'gameover'
+      screen: 'start',
+
+      // Параметры канваса и игры
       canvas: null,
       ctx: null,
       gameWidth: 300,
       gameHeight: 500,
       floorWidth: 150,
       floorHeight: 20,
+
+      // Массив уже поставленных этажей и активный этаж
       tower: [],
       currentFloor: null,
       score: 0,
       highScore: 0,
       gameOver: false,
       animationFrameId: null,
+
+      // Физика и параметры качания
       gravity: 0.5,
       maxSwingAngle: 0.5,
+
+      // Накопленное горизонтальное отклонение (игровая логика)
       towerSway: 0,
       towerSwayVelocity: 0,
-      swayThreshold: 100,
+      swayThreshold: 100,  // теперь 100
+
+      // Для вертикального скролла (не более 10 этажей на экране)
       cameraOffset: 0,
       targetCameraOffset: 0,
-      // Новые константы для фиксированного троса
-      fixedPivotY: 50,    // фиксированная высота, где находится верхняя точка (троса)
-      activeFloorY: 100,    // активный этаж (его верх) всегда на этой высоте при качании
-      ropeLength: 50        // длина троса (activeFloorY - fixedPivotY)
+
+      // Константы для фиксированного положения троса и активного этажа (режим качания)
+      fixedPivotY: 50,    // точка, где находится верхняя точка троса
+      activeFloorY: 100,   // в режиме качания верхняя грань активного этажа всегда на этой высоте
+      ropeLength: 50,      // расстояние между fixedPivotY и activeFloorY
+
+      // Счётчик кадров для отсрочки поражения (не используется здесь для визуализации шкалы)
+      overThresholdCount: 0
     }
   },
   mounted() {
@@ -56,27 +73,24 @@ export default {
     this.canvas.height = this.gameHeight;
     this.ctx = this.canvas.getContext('2d');
 
-    // Поддержка тач-событий для мобильных устройств
+    // Обработка тач- и click-событий (отпускание этажа)
     this.canvas.addEventListener('touchstart', (e) => {
       e.preventDefault();
-      this.handleTap();
+      if (this.screen === 'game') this.handleTap();
     });
     this.canvas.addEventListener('click', () => {
-      this.handleTap();
+      if (this.screen === 'game') this.handleTap();
     });
 
     const storedScore = localStorage.getItem('highScore');
     if (storedScore) {
       this.highScore = parseInt(storedScore);
     }
-    this.startGame();
-  },
-  beforeDestroy() {
-    cancelAnimationFrame(this.animationFrameId);
   },
   methods: {
+    // Запуск игры (при клике на Start)
     startGame() {
-      // Сброс игровых переменных
+      this.screen = 'game';
       this.tower = [];
       this.score = 0;
       this.gameOver = false;
@@ -84,8 +98,9 @@ export default {
       this.towerSwayVelocity = 0;
       this.cameraOffset = 0;
       this.targetCameraOffset = 0;
+      this.overThresholdCount = 0;
 
-      // Базовый этаж – фиксирован внизу «мира»
+      // Базовый этаж – фиксирован внизу экрана
       const baseFloor = {
         x: (this.gameWidth - this.floorWidth) / 2,
         y: this.gameHeight - this.floorHeight
@@ -96,33 +111,29 @@ export default {
     },
     createNextFloor() {
       const lastFloor = this.tower[this.tower.length - 1];
-      // Опорная точка для троса: x – центр предыдущего этажа, y – фиксированное значение (fixedPivotY)
+      // Опорная точка для троса: x – центр предыдущего этажа, y – фиксированное значение fixedPivotY
       const pivotX = lastFloor.x + this.floorWidth / 2;
       const pivotY = this.fixedPivotY;
-      const ropeLen = this.ropeLength;
       this.currentFloor = {
-        state: 'swinging',  // состояния: 'swinging' и 'falling'
+        state: 'swinging',  // 'swinging' — качается, 'falling' — падает
         angle: 0,
         angularVelocity: 0.03,
         pivotX: pivotX,
         pivotY: pivotY,
-        ropeLength: ropeLen,
-        // При качании активный этаж всегда находится на высоте activeFloorY,
-        // а его x вычисляется от pivotX с использованием sin(angle)
-        x: pivotX + ropeLen * Math.sin(0) - this.floorWidth / 2,
+        ropeLength: this.ropeLength,
+        // В режиме качания: верхняя грань этажа всегда на activeFloorY, x вычисляется по углу
+        x: pivotX + this.ropeLength * Math.sin(0) - this.floorWidth / 2,
         y: this.activeFloorY,
-        fallVY: 0
+        fallVY: 0,
+        lockedX: null  // При отпускании фиксируется горизонтальное положение
       }
     },
+    // Отпускание этажа (смена состояния с 'swinging' на 'falling')
     handleTap() {
-      if (this.gameOver || !this.currentFloor) return;
-      if (this.currentFloor.state === 'swinging') {
+      if (this.currentFloor && this.currentFloor.state === 'swinging') {
+        this.currentFloor.lockedX = this.currentFloor.x;
         this.currentFloor.state = 'falling';
       }
-    },
-    stabilizeTower() {
-      this.towerSway *= 0.5;
-      this.towerSwayVelocity *= 0.5;
     },
     animate() {
       this.animationFrameId = requestAnimationFrame(this.animate);
@@ -132,8 +143,8 @@ export default {
     update() {
       if (this.currentFloor) {
         if (this.currentFloor.state === 'swinging') {
-          // Обновляем угол качания и только горизонтальное смещение,
-          // а вертикальная координата активного этажа остаётся равной activeFloorY.
+          // В режиме качания обновляем угол, вычисляем новое горизонтальное положение.
+          // Вертикальная координата фиксирована.
           this.currentFloor.angle += this.currentFloor.angularVelocity;
           if (this.currentFloor.angle > this.maxSwingAngle || this.currentFloor.angle < -this.maxSwingAngle) {
             this.currentFloor.angularVelocity = -this.currentFloor.angularVelocity;
@@ -141,35 +152,37 @@ export default {
           this.currentFloor.x = this.currentFloor.pivotX + this.currentFloor.ropeLength * Math.sin(this.currentFloor.angle) - this.floorWidth / 2;
           this.currentFloor.y = this.activeFloorY;
         } else if (this.currentFloor.state === 'falling') {
-          // Режим падения: активный этаж начинает двигаться вниз с действием гравитации
+          // В режиме падения горизонтальное положение фиксировано
+          if (this.currentFloor.lockedX !== null) {
+            this.currentFloor.x = this.currentFloor.lockedX;
+          }
           this.currentFloor.fallVY += this.gravity;
           this.currentFloor.y += this.currentFloor.fallVY;
           const lastFloor = this.tower[this.tower.length - 1];
           if (this.currentFloor.y + this.floorHeight >= lastFloor.y) {
-            // При столкновении выравниваем этаж точно на верх предыдущего
+            // При столкновении активный этаж фиксируется ровно сверху предыдущего
             this.currentFloor.y = lastFloor.y - this.floorHeight;
             const currentCenter = this.currentFloor.x + this.floorWidth / 2;
             const lastCenter = lastFloor.x + this.floorWidth / 2;
             const deltaX = currentCenter - lastCenter;
             this.towerSwayVelocity += deltaX * 0.1;
+            // Фиксируем этаж – добавляем его в башню
             this.tower.push({
               x: this.currentFloor.x,
               y: this.currentFloor.y
             });
             this.score++;
-            if (Math.abs(this.towerSway + this.towerSwayVelocity) > this.swayThreshold) {
-              this.endGame();
-              return;
-            }
             this.createNextFloor();
           }
         }
       }
-      // Обновляем горизонтальное смещение с эффектом демпфирования
+
+      // Обновляем горизонтальное отклонение с демпфированием
       this.towerSwayVelocity *= 0.98;
       this.towerSway += this.towerSwayVelocity;
 
-      // Если построено более 10 этажей, начинаем плавный вертикальный скролл
+      // Плавный вертикальный скролл: если построено более 10 этажей,
+      // нижний из последних 10 этажей должен быть на позиции (gameHeight - floorHeight)
       if (this.tower.length > 10) {
         const bottomVisibleFloor = this.tower[this.tower.length - 10];
         this.targetCameraOffset = (this.gameHeight - this.floorHeight) - bottomVisibleFloor.y;
@@ -178,44 +191,96 @@ export default {
       }
       this.cameraOffset += (this.targetCameraOffset - this.cameraOffset) * 0.1;
 
-      // Удаляем этажи, ушедшие за нижнюю границу экрана
+      // Удаляем этажи, вышедшие за нижнюю границу экрана
       while (this.tower.length && (this.tower[0].y + this.cameraOffset) > this.gameHeight) {
         this.tower.shift();
+      }
+
+      // Здесь проверяем, сохраняется ли отклонение за пределами допустимого (но поражение срабатывает не мгновенно)
+      if (Math.abs(this.towerSway + this.towerSwayVelocity) > this.swayThreshold) {
+        this.overThresholdCount++;
+        if (this.overThresholdCount > 20) {
+          this.endGame();
+          return;
+        }
+      } else {
+        this.overThresholdCount = 0;
       }
     },
     render() {
       this.ctx.clearRect(0, 0, this.gameWidth, this.gameHeight);
 
-      // 1. Отрисовка уже поставленных этажей с вертикальным сдвигом (камера)
+      // Вычисляем горизонтальный сдвиг для центровки башни по верхнему блоку
+      let centerOffset = 0;
+      if (this.tower.length) {
+        const topBlock = this.tower[this.tower.length - 1];
+        centerOffset = (this.gameWidth / 2) - (topBlock.x + this.floorWidth / 2);
+      }
+
+      // 1. Отрисовка уже поставленных этажей с вертикальным скроллом и центровкой
       this.ctx.save();
-      this.ctx.translate(this.towerSway, this.cameraOffset);
+      this.ctx.translate(centerOffset, this.cameraOffset);
       this.tower.forEach(floor => {
         this.ctx.fillStyle = '#3498db';
         this.ctx.fillRect(floor.x, floor.y, this.floorWidth, this.floorHeight);
       });
       this.ctx.restore();
 
-      // 2. Отрисовка активного этажа и его троса без вертикального сдвига,
-      // чтобы он оставался на фиксированной высоте
+      // 2. Отрисовка активного этажа (с той же центровкой)
+      this.ctx.save();
+      this.ctx.translate(centerOffset, 0);
       if (this.currentFloor) {
         if (this.currentFloor.state === 'swinging') {
           this.ctx.strokeStyle = '#555';
           this.ctx.lineWidth = 2;
           this.ctx.beginPath();
-          // Трос всегда начинается от фиксированной точки (pivot) с y = fixedPivotY
-          this.ctx.moveTo(this.currentFloor.pivotX, this.currentFloor.pivotY);
+          this.ctx.moveTo(this.currentFloor.pivotX, this.fixedPivotY);
           const blockTopCenterX = this.currentFloor.x + this.floorWidth / 2;
-          const blockTopCenterY = this.activeFloorY;
-          this.ctx.lineTo(blockTopCenterX, blockTopCenterY);
+          this.ctx.lineTo(blockTopCenterX, this.activeFloorY);
           this.ctx.stroke();
         }
         this.ctx.fillStyle = '#e74c3c';
         this.ctx.fillRect(this.currentFloor.x, this.currentFloor.y, this.floorWidth, this.floorHeight);
       }
+      this.ctx.restore();
+
+      // 3. Отрисовка шкалы в нижней части экрана
+      // Шкала отображает диапазон от -100 до +100 (swayThreshold)
+      const scaleWidth = 200;
+      const scaleHeight = 10;
+      const scaleX = (this.gameWidth - scaleWidth) / 2;
+      const scaleY = this.gameHeight - 30;
+
+      // Рисуем фон шкалы (зона безопасности)
+      this.ctx.fillStyle = "#0f0";
+      this.ctx.fillRect(scaleX, scaleY, scaleWidth, scaleHeight);
+
+      // Рисуем границы шкалы
+      this.ctx.strokeStyle = "#000";
+      this.ctx.strokeRect(scaleX, scaleY, scaleWidth, scaleHeight);
+
+      // Вычисляем позицию маркера текущего отклонения
+      // Принимаем, что диапазон шкалы соответствует значениям от -100 до +100
+      const markerX = scaleX + ((this.towerSway + this.swayThreshold) / (this.swayThreshold * 2)) * scaleWidth;
+
+      // Если значение выходит за пределы, то рисуем маркер красным
+      this.ctx.strokeStyle = (Math.abs(this.towerSway) > this.swayThreshold) ? "#f00" : "#000";
+      this.ctx.beginPath();
+      this.ctx.moveTo(markerX, scaleY);
+      this.ctx.lineTo(markerX, scaleY + scaleHeight);
+      this.ctx.stroke();
+
+      // Можно добавить подписи
+      this.ctx.font = "12px Arial";
+      this.ctx.fillStyle = "#000";
+      this.ctx.fillText("-100", scaleX - 25, scaleY + scaleHeight);
+      this.ctx.fillText("0", scaleX + scaleWidth / 2 - 5, scaleY + scaleHeight + 15);
+      this.ctx.fillText("+100", scaleX + scaleWidth + 5, scaleY + scaleHeight);
     },
     endGame() {
       this.gameOver = true;
       cancelAnimationFrame(this.animationFrameId);
+      this.screen = 'gameover';
       if (this.score > this.highScore) {
         this.highScore = this.score;
         localStorage.setItem('highScore', this.highScore);
@@ -223,7 +288,8 @@ export default {
     },
     restart() {
       cancelAnimationFrame(this.animationFrameId);
-      this.startGame();
+      // При перезапуске возвращаемся к стартовому экрану
+      this.screen = 'start';
     }
   }
 }
@@ -231,8 +297,10 @@ export default {
 
 <style scoped>
 .game-container {
+  position: relative;
   margin: 0 auto;
   width: 300px;
+  height: 500px;
   text-align: center;
   user-select: none;
 }
@@ -243,25 +311,31 @@ canvas {
   margin: 0 auto;
   touch-action: manipulation;
 }
-.score {
+.score-display {
+  position: absolute;
+  top: 10px;
+  left: 10px;
   font-size: 18px;
-  margin-top: 10px;
+  color: #333;
 }
-.sway-indicator {
-  margin-top: 5px;
-  font-size: 14px;
+.overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 300px;
+  height: 500px;
+  background: rgba(255, 255, 255, 0.9);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
 }
-.tap-button,
-.stabilize-button {
-  margin-top: 10px;
+.overlay h1 {
+  margin-bottom: 20px;
+}
+.overlay button {
   padding: 10px 20px;
   font-size: 16px;
   cursor: pointer;
-}
-.game-over {
-  margin-top: 10px;
-  padding: 10px;
-  border: 1px solid #333;
-  background: #fff;
 }
 </style>
